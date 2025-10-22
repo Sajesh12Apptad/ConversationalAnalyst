@@ -16,7 +16,7 @@ from collections import OrderedDict
 # ===================== Optimization Layer =====================
 
 CACHE = OrderedDict()
-CACHE_TTL = 0  # 24 hours
+CACHE_TTL = 60 * 60 * 24  # 24 hours
 
 TEMPLATES = {
     "thanks": "You're welcome!",
@@ -153,22 +153,28 @@ def detect_intent(prompt: str, conversation_history: List[Dict]) -> str:
     """
     Detect user intent:
     - ANALYTICAL_QUESTION: User asking a specific data question (who, what, which, how many, etc.)
+    - FORECASTING: User asking about future predictions or estimates
     - DASHBOARD_REQUEST: User wants to build a dashboard/visualization
     - GENERAL_CHAT: General conversation
     """
     prompt_lower = prompt.lower()
     
+    # Check for forecasting keywords first
+    forecasting_keywords = ["forecast", "predict", "future", "upcoming", "next month", "next year",
+                           "next quarter", "estimate", "projection", "trend forward", "what will",
+                           "will be", "expect", "anticipated"]
+    
+    if any(keyword in prompt_lower for keyword in forecasting_keywords):
+        return "FORECASTING"
+    
     # Check conversation history first for context
     if conversation_history:
-        # Look at last 2 messages
-        for msg in conversation_history[-2:]:
+        # Look at last message from assistant
+        for msg in reversed(conversation_history[-2:]):
             if msg.get("role") == "assistant":
                 content = msg.get("content", "").lower()
-                # If we're already in dashboard conversation, stay in it
-                if any(keyword in content for keyword in ["dashboard", "visualization", "insights", "trends", "highlight"]):
-                    return "DASHBOARD_REQUEST"
-                # If we suggested options, definitely dashboard mode
-                if "option" in content or "suggest" in content:
+                # If we just suggested options, stay in dashboard mode
+                if "option" in content and ("chart" in content or "visualization" in content):
                     return "DASHBOARD_REQUEST"
     
     # Dashboard/visualization keywords - check these first
@@ -178,25 +184,24 @@ def detect_intent(prompt: str, conversation_history: List[Dict]) -> str:
     
     # Strong indicators of wanting dashboard/analysis (not just a quick question)
     dashboard_phrases = ["i am looking for", "i want to see", "interested in", "focusing on",
-                        "particularly interested", "looking to"]
+                        "particularly interested", "looking to", "build dashboard", "create dashboard"]
+    
+    # Quick analytical question keywords
+    quick_question_keywords = ["show me", "which product", "what is", "how many", "find the",
+                              "tell me", "list", "give me", "display", "can you show"]
+    
+    # Check for quick analytical questions
+    if any(keyword in prompt_lower for keyword in quick_question_keywords):
+        # Make sure it's not asking for a dashboard/visualization
+        if not any(keyword in prompt_lower for keyword in dashboard_keywords):
+            return "ANALYTICAL_QUESTION"
     
     # Check for dashboard intent
     if any(keyword in prompt_lower for keyword in dashboard_keywords):
         return "DASHBOARD_REQUEST"
     
-    # Check for phrases that indicate planning/exploration (dashboard mode)
     if any(phrase in prompt_lower for phrase in dashboard_phrases):
         return "DASHBOARD_REQUEST"
-    
-    # Analytical question keywords - these are QUICK questions
-    question_keywords = ["can you show", "show me the", "what is the", "which product has",
-                        "how many products", "tell me which", "find the", "list the"]
-    
-    # Check for direct analytical questions (quick answers)
-    if any(keyword in prompt_lower for keyword in question_keywords):
-        # Make sure it's a direct question, not a dashboard request
-        if not any(keyword in prompt_lower for keyword in dashboard_keywords):
-            return "ANALYTICAL_QUESTION"
     
     return "GENERAL_CHAT"
 
@@ -281,7 +286,147 @@ def determine_dashboard_phase(conversation_history: List[Dict], user_prompt: str
     return "INTERVIEW"
 
 
-def answer_analytical_question(prompt: str, selected_dataset: str, conversation_history: List[Dict]) -> Dict[str, Any]:
+def generate_forecast(prompt: str, selected_dataset: str, conversation_history: List[Dict]) -> Dict[str, Any]:
+    """
+    Generate forecasts based on historical data
+    """
+    dataset_context = build_context(selected_dataset)
+    
+    system_instructions = f"""You are Aevah, a data analyst with forecasting capabilities. The user is asking for a forecast or prediction.
+
+{dataset_context}
+
+YOUR TASK:
+1. Generate a SQL query to get HISTORICAL data needed for forecasting
+2. Identify the time period, product/category, and metric to forecast
+3. Return the query and forecasting parameters
+
+CRITICAL SQL RULES:
+- ALWAYS wrap column names in square brackets: [Column Name]
+- Get data sorted by date: ORDER BY [Time Period End Date] ASC
+- Include at least 3-6 months of historical data for good forecasts
+- Select: date column, grouping columns, and the metric to forecast
+
+RESPONSE FORMAT (JSON only):
+{{
+  "sql_query": "SELECT [Date Column], [Product], [Metric] FROM [{selected_dataset}] WHERE ... ORDER BY [Date Column] ASC",
+  "forecast_periods": 1,
+  "forecast_unit": "month|quarter|year",
+  "metric_name": "Sales|Revenue|Units",
+  "grouping": ["Product", "Category"],
+  "explanation": "Brief explanation"
+}}
+
+Examples:
+- "forecast next month's sales for Product X" → Get last 6 months of sales data for Product X
+- "predict Q1 revenue" → Get last 4 quarters of revenue data
+- "what will sales be next year" → Get last 3 years of sales data
+
+User Question: {prompt}
+
+Respond with ONLY the JSON, no other text."""
+
+    messages = [{"role": "user", "content": system_instructions}]
+    
+    try:
+        payload = {
+            "model": "mistralai/mistral-7b-instruct-v0.3",
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": 600,
+            "stream": False
+        }
+        
+        response = requests.post(LM_STUDIO_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        
+        # Parse JSON
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].strip()
+        
+        parsed = json.loads(content)
+        return parsed
+        
+    except Exception as e:
+        raise Exception(f"Failed to generate forecast query: {str(e)}")
+
+
+def calculate_simple_forecast(historical_data: List[Dict], metric_name: str, periods: int = 1) -> Dict[str, Any]:
+    """
+    Calculate simple moving average and trend-based forecast
+    """
+    if not historical_data or len(historical_data) < 2:
+        return {
+            "forecast_values": [],
+            "method": "insufficient_data",
+            "confidence": "low",
+            "message": "Not enough historical data for reliable forecasting"
+        }
+    
+    # Extract metric values
+    values = []
+    for row in historical_data:
+        val = row.get(metric_name)
+        if val is not None:
+            try:
+                values.append(float(val))
+            except (ValueError, TypeError):
+                continue
+    
+    if len(values) < 2:
+        return {
+            "forecast_values": [],
+            "method": "insufficient_data",
+            "confidence": "low"
+        }
+    
+    # Calculate simple moving average (last 3 periods)
+    window = min(3, len(values))
+    recent_avg = sum(values[-window:]) / window
+    
+    # Calculate trend (simple linear)
+    if len(values) >= 3:
+        recent_trend = (values[-1] - values[-3]) / 3
+    else:
+        recent_trend = values[-1] - values[-2]
+    
+    # Generate forecast
+    forecasts = []
+    last_value = values[-1]
+    
+    for i in range(1, periods + 1):
+        # Weighted forecast: 70% trend-based, 30% moving average
+        trend_forecast = last_value + (recent_trend * i)
+        forecast_value = (trend_forecast * 0.7) + (recent_avg * 0.3)
+        forecasts.append(round(forecast_value, 2))
+    
+    # Calculate confidence based on data stability
+    if len(values) >= 4:
+        variance = sum((v - recent_avg) ** 2 for v in values[-4:]) / 4
+        std_dev = variance ** 0.5
+        cv = (std_dev / recent_avg) * 100 if recent_avg != 0 else 100
+        
+        if cv < 10:
+            confidence = "high"
+        elif cv < 25:
+            confidence = "medium"
+        else:
+            confidence = "low"
+    else:
+        confidence = "medium"
+    
+    return {
+        "forecast_values": forecasts,
+        "method": "moving_average_with_trend",
+        "confidence": confidence,
+        "recent_average": round(recent_avg, 2),
+        "trend": round(recent_trend, 2),
+        "historical_last_value": round(last_value, 2)
+    }
     """
     Answer direct analytical questions by generating SQL and returning insights
     """
@@ -299,22 +444,21 @@ CRITICAL SQL RULES:
 - ALWAYS wrap column names in square brackets: [Column Name]
 - ALWAYS wrap table names in square brackets: [{selected_dataset}]
 - Use brackets everywhere: SELECT, WHERE, GROUP BY, ORDER BY, calculations
-- For dates, use simple comparison: [Time Period End Date] LIKE '2023%' for year 2023
+- For dates, use simple comparison: [Time Period End Date] >= '2023-07-01' AND [Time Period End Date] <= '2023-07-31'
 - For cannibalization: typically [Base Dollars] - [Incr Dollars]
 - Use LIMIT to restrict results when appropriate (e.g., "top 5" means LIMIT 5)
-- DO NOT use functions like YEAR() - they may not be supported
+- DO NOT use functions like YEAR(), MONTH() - they may not be supported
 - Keep queries simple and direct
+- If a column doesn't exist in the dataset, use the closest available column
+
+AVAILABLE COLUMNS (use these exact names in brackets):
+{', '.join([col['name'] for col in get_dataset_summary(selected_dataset)['columns']])}
 
 RESPONSE FORMAT (JSON only):
 {{
   "sql_query": "SELECT [Column1], [Column2] FROM [{selected_dataset}] WHERE ... ORDER BY ... LIMIT ...",
   "explanation": "Brief explanation of what this query does"
 }}
-
-Examples:
-- "Products from 2023 with pack count 12" → SELECT [Product], ([Base Dollars] - [Incr Dollars]) AS Cannibalization FROM [{selected_dataset}] WHERE [Time Period End Date] LIKE '2023%' AND [Pack Count] = 12 ORDER BY Cannibalization DESC
-- "How many products with pack count 12?" → SELECT COUNT(*) as count FROM [{selected_dataset}] WHERE [Pack Count] = 12
-- "Top 5 products by base dollars" → SELECT [Product], [Base Dollars] FROM [{selected_dataset}] ORDER BY [Base Dollars] DESC LIMIT 5
 
 User Question: {prompt}
 
@@ -349,8 +493,12 @@ Respond with ONLY the JSON, no other text."""
         elif "```" in content:
             content = content.split("```")[1].strip()
         
-        parsed = json.loads(content)
-        return parsed
+        try:
+            parsed = json.loads(content)
+            return parsed
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON: {content}")
+            raise Exception(f"Failed to generate valid SQL query format")
         
     except Exception as e:
         raise Exception(f"Failed to generate SQL: {str(e)}")
@@ -657,7 +805,82 @@ async def process_query(request: QueryRequest):
         intent = detect_intent(request.prompt, conversation_history)
         
         # Handle based on intent
-        if intent == "ANALYTICAL_QUESTION":
+        if intent == "FORECASTING":
+            # User is asking for a forecast/prediction
+            try:
+                forecast_spec = generate_forecast(request.prompt, selected, conversation_history)
+                sql_query = forecast_spec.get("sql_query")
+                
+                # Execute query to get historical data
+                historical_data = execute_sql(sql_query, selected)
+                
+                if not historical_data or len(historical_data) < 2:
+                    return {
+                        "type": "chat",
+                        "response": "I don't have enough historical data to generate a reliable forecast. I need at least 2-3 data points over time to predict future trends.",
+                        "success": False
+                    }
+                
+                # Calculate forecast
+                metric_name = forecast_spec.get("metric_name", list(historical_data[0].keys())[-1])
+                periods = forecast_spec.get("forecast_periods", 1)
+                forecast_unit = forecast_spec.get("forecast_unit", "month")
+                
+                forecast_result = calculate_simple_forecast(historical_data, metric_name, periods)
+                
+                # Build response
+                if forecast_result["method"] == "insufficient_data":
+                    response_text = forecast_result.get("message", "Insufficient data for forecasting")
+                else:
+                    forecast_values = forecast_result["forecast_values"]
+                    confidence = forecast_result["confidence"]
+                    
+                    response_text = f"""📊 **Forecast Analysis**
+
+Based on historical data analysis, here's my prediction:
+
+**Historical Context:**
+- Recent average: {forecast_result.get('recent_average', 'N/A')}
+- Last recorded value: {forecast_result.get('historical_last_value', 'N/A')}
+- Trend: {'+' if forecast_result.get('trend', 0) > 0 else ''}{forecast_result.get('trend', 'N/A')} per period
+
+**Forecast for next {periods} {forecast_unit}(s):**
+{chr(10).join([f"- Period {i+1}: {val:,.2f}" for i, val in enumerate(forecast_values)])}
+
+**Confidence Level:** {confidence.upper()}
+**Method:** Moving average with trend analysis
+
+**Note:** This forecast is based on {len(historical_data)} historical data points. The {confidence} confidence level indicates {'strong' if confidence == 'high' else 'moderate' if confidence == 'medium' else 'significant'} variability in historical data.
+
+**Recommendation:** {
+    'Historical trends are stable. This forecast should be reliable for planning.' if confidence == 'high' else
+    'There is some variability in the data. Consider external factors that might affect future performance.' if confidence == 'medium' else
+    'High variability detected. Use this forecast with caution and consider additional factors.'
+}"""
+                
+                return {
+                    "type": "forecast",
+                    "prompt": request.prompt,
+                    "response": response_text,
+                    "forecast_data": {
+                        "forecasts": forecast_values,
+                        "confidence": confidence,
+                        "historical_data": historical_data[-10:],  # Last 10 points
+                        "metric_name": metric_name
+                    },
+                    "sql_query": sql_query,
+                    "intent": "FORECASTING",
+                    "success": True
+                }
+                
+            except Exception as e:
+                return {
+                    "type": "chat",
+                    "response": f"I had trouble generating a forecast: {str(e)}. Could you provide more details about what you'd like to predict?",
+                    "success": False
+                }
+        
+        elif intent == "ANALYTICAL_QUESTION":
             # User is asking a data question - answer it directly
             try:
                 sql_result = answer_analytical_question(request.prompt, selected, conversation_history)
@@ -692,52 +915,205 @@ async def process_query(request: QueryRequest):
             phase = determine_dashboard_phase(conversation_history, request.prompt)
             conversation_state["phase"] = phase
             
-            result = build_dashboard_conversation(request.prompt, selected, conversation_history, phase)
+            print(f"DEBUG: Dashboard phase detected: {phase}")
             
-            # For READY_TO_BUILD phase, try to parse SQL and config from response
+            # If READY_TO_BUILD, generate specs directly
             if phase == "READY_TO_BUILD":
                 try:
-                    response_content = result["response"]
+                    # Determine which option was selected
+                    prompt_lower = request.prompt.lower()
+                    option_num = 0
+                    if "option 1" in prompt_lower or "first" in prompt_lower:
+                        option_num = 1
+                    elif "option 2" in prompt_lower or "second" in prompt_lower:
+                        option_num = 2
+                    elif "option 3" in prompt_lower or "third" in prompt_lower:
+                        option_num = 3
                     
-                    # Try to parse JSON from response
-                    if "```json" in response_content:
-                        json_str = response_content.split("```json")[1].split("```")[0].strip()
-                    elif "{" in response_content:
-                        # Find JSON in the response
-                        start = response_content.find("{")
-                        end = response_content.rfind("}") + 1
-                        json_str = response_content[start:end]
-                    else:
-                        json_str = None
+                    print(f"DEBUG: User selected option {option_num}")
                     
-                    if json_str:
-                        parsed = json.loads(json_str)
-                        
-                        return {
-                            "type": "ready_to_build",
-                            "prompt": request.prompt,
-                            "confirmation": parsed.get("confirmation", ""),
-                            "sql_query": parsed.get("sql_query", ""),
-                            "chart_type": parsed.get("chart_type", "table"),
-                            "superset_config": parsed.get("superset_config", {}),
-                            "explanation": parsed.get("explanation", ""),
-                            "phase": "READY_TO_BUILD",
-                            "conversation_state": conversation_state,
-                            "intent": "DASHBOARD_REQUEST",
-                            "success": True
-                        }
+                    dataset_context = build_context(selected)
+                    
+                    # Extract key requirements from conversation history
+                    user_requirements = []
+                    for msg in conversation_history[-10:]:
+                        if msg.get("role") == "user":
+                            user_requirements.append(msg.get("content", ""))
+                    
+                    requirements_text = " ".join(user_requirements)
+                    print(f"DEBUG: User requirements: {requirements_text[:200]}")
+                    
+                    # Get the option description from previous assistant message
+                    option_description = ""
+                    for msg in reversed(conversation_history[-3:]):
+                        if msg.get("role") == "assistant":
+                            content = msg.get("content", "")
+                            if f"option {option_num}" in content.lower():
+                                # Extract the specific option text
+                                lines = content.split('\n')
+                                capturing = False
+                                for line in lines:
+                                    if f"**option {option_num}" in line.lower():
+                                        capturing = True
+                                    if capturing:
+                                        option_description += line + " "
+                                        if f"**option {option_num + 1}" in line.lower():
+                                            break
+                                break
+                    
+                    print(f"DEBUG: Option description: {option_description[:200]}")
+                    
+                    system_instructions = f"""You are Aevah. The user selected visualization Option {option_num}.
+
+{dataset_context}
+
+USER'S REQUIREMENTS (from conversation):
+{requirements_text}
+
+THE OPTION THEY SELECTED (Option {option_num}):
+{option_description}
+
+Generate a UNIQUE Superset YAML configuration specifically for THIS option and THESE requirements.
+
+RESPOND WITH ONLY YAML - NO OTHER TEXT:
+
+title: "[Descriptive title based on what user asked for]"
+description: "[What this specific chart shows based on user requirements]"
+chart_type: "{["stacked_bar", "line", "pie"][option_num-1] if option_num > 0 else "bar"}"
+
+data_source:
+  query: |
+    SELECT 
+      [relevant columns based on user requirements]
+    FROM [{selected}]
+    WHERE [filters matching user requirements]
+    GROUP BY [relevant grouping]
+    ORDER BY [relevant sorting]
+    LIMIT 100
+    
+  columns:
+    - name: "[Column Name]"
+      type: "dimension"
+      description: "[What this column represents]"
+    - name: "[Metric Name]"
+      type: "metric"
+      expression: "SUM([Column])"
+      description: "[What this metric shows]"
+
+visualization:
+  type: "{["stacked_bar", "line", "pie"][option_num-1] if option_num > 0 else "bar"}"
+  x_axis: "[Column for X - must match user requirements]"
+  y_axis: "[Metric for Y - must match user requirements]"
+  stacking: {"true" if option_num == 1 else "false"}
+  
+dimensions:
+  - "[Dimension 1 based on requirements]"
+  - "[Dimension 2 if needed]"
+
+metrics:
+  - name: "[Metric name matching user request]"
+    expression: "SUM([Column matching user metric])"
+    format: "currency|number|percent"
+
+filters:
+  - column: "[Date Column]"
+    operator: "BETWEEN"
+    value: ["[start date from requirements]", "[end date from requirements]"]
+  - column: "[Category Column]"
+    operator: "IN"
+    value: ["[values from user requirements]"]
+
+grouping:
+  group_by: ["[columns for grouping]"]
+  sort_by: "[sort column]"
+  sort_order: "DESC"
+  limit: 100
+
+CRITICAL:
+- Use ACTUAL column names from the dataset
+- Match the user's SPECIFIC requirements (dates, filters, metrics)
+- Make Option {option_num} DIFFERENT from other options
+- If user mentioned "cannibalization", calculate it as [Base Dollars] - [Incr Dollars]
+- If user mentioned "price elasticity", mention elasticity metrics
+- Use dates, retailers, products EXACTLY as user specified"""
+
+                    messages = [
+                        {"role": "user", "content": system_instructions}
+                    ]
+                    
+                    payload = {
+                        "model": "mistralai/mistral-7b-instruct-v0.3",
+                        "messages": messages,
+                        "temperature": 0.3,  # Increased for more variety
+                        "max_tokens": 1500,  # Increased for full YAML
+                        "stream": False
+                    }
+                    
+                    print(f"DEBUG: Calling LLM to generate YAML config for option {option_num}")
+                    response = requests.post(LM_STUDIO_URL, json=payload, timeout=60)
+                    response.raise_for_status()
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"].strip()
+                    
+                    print(f"DEBUG: LLM Response: {content[:200]}")
+                    
+                    # Remove any markdown code block markers
+                    if "```yaml" in content:
+                        content = content.split("```yaml")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        content = content.split("```")[1].split("```")[0].strip()
+                    
+                    config_text = content
+                    
+                    # Extract title if possible
+                    title = "Superset Configuration"
+                    if "title:" in config_text:
+                        title_line = [line for line in config_text.split('\n') if 'title:' in line][0]
+                        title = title_line.split('title:')[1].strip().strip('"\'')
+                    
+                    # Build confirmation message with specific details
+                    chart_types = ["Stacked Bar Chart", "Line Chart", "Pie Chart"]
+                    chart_type_name = chart_types[option_num - 1] if 1 <= option_num <= 3 else "Chart"
+                    
+                    confirmation = f"""Perfect! You've selected Option {option_num}: {chart_type_name}.
+
+This visualization will help you analyze your data by showing {option_description[:150] if option_description else 'the metrics you requested'}.
+
+Here is the Superset configuration tailored to your requirements:"""
+                    
+                    return {
+                        "type": "ready_to_build",
+                        "prompt": request.prompt,
+                        "confirmation": confirmation,
+                        "config": config_text,
+                        "phase": "READY_TO_BUILD",
+                        "conversation_state": conversation_state,
+                        "intent": "DASHBOARD_REQUEST",
+                        "success": True
+                    }
+                    
                 except Exception as e:
-                    print(f"Error parsing READY_TO_BUILD response: {e}")
-            
-            return {
-                "type": "dashboard_building",
-                "prompt": request.prompt,
-                "response": result["response"],
-                "phase": phase,
-                "conversation_state": conversation_state,
-                "intent": "DASHBOARD_REQUEST",
-                "success": True
-            }
+                    print(f"DEBUG: Error in READY_TO_BUILD: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return {
+                        "type": "chat",
+                        "response": f"Error generating specifications: {str(e)}",
+                        "success": False
+                    }
+            else:
+                # INTERVIEW or ITERATION phase - use conversational approach
+                result = build_dashboard_conversation(request.prompt, selected, conversation_history, phase)
+                
+                return {
+                    "type": "dashboard_building",
+                    "prompt": request.prompt,
+                    "response": result["response"],
+                    "phase": phase,
+                    "conversation_state": conversation_state,
+                    "intent": "DASHBOARD_REQUEST",
+                    "success": True
+                }
         
         else:
             # General conversation
