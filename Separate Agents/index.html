@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Data Analyst Chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-50 flex">
+    <!-- Sidebar -->
+    <div id="sidebar" class="w-64 bg-gray-900 text-white flex flex-col h-screen fixed left-0 top-0">
+        <div class="p-4 border-b border-gray-700">
+            <button id="newChatBtn" class="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg flex items-center justify-center gap-2">
+                <span class="text-xl">+</span>
+                <span>New Chat</span>
+            </button>
+        </div>
+        <div id="chatList" class="flex-1 overflow-y-auto p-2">
+            <p class="text-gray-400 text-sm text-center py-4">No chats yet</p>
+        </div>
+        <div class="p-4 border-t border-gray-700 text-xs text-gray-400">
+            <p>Aevah AI Analyst</p>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 ml-64">
+    <div class="max-w-6xl mx-auto px-4 py-8">
+        <div class="text-center mb-4">
+            <h1 class="text-3xl font-bold text-gray-800">AI Data Analyst</h1>
+            <p class="text-gray-600">Chat with your AI analyst</p>
+        </div>
+
+        <!-- Dataset Section -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
+            <div class="flex gap-4 items-center mb-4">
+                <div class="flex-1">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Select Dataset:</label>
+                    <select id="datasetSelect" class="w-full border border-gray-300 rounded-md px-3 py-2">
+                        <option value="">Auto-select</option>
+                    </select>
+                </div>
+                <div class="flex gap-2 items-end">
+                    <input id="fileInput" type="file" accept=".csv" class="border p-2 rounded" />
+                    <input id="tableName" placeholder="Table name" class="border p-2 rounded w-32" />
+                    <button id="uploadBtn" class="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">Upload</button>
+                    <button id="viewSavedBtn" class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700">📊 Saved</button>
+                </div>
+            </div>
+            <div id="uploadStatus" class="text-sm text-gray-600"></div>
+            <div id="tablesList" class="text-sm text-gray-700"></div>
+        </div>
+
+        <!-- Saved Charts Modal -->
+        <div id="savedConfigsModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg shadow-xl p-6 max-w-6xl w-full max-h-[90vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold text-gray-800">💾 Saved Charts</h2>
+                    <button id="closeSavedModal" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <div id="savedConfigsList" class="space-y-4"></div>
+            </div>
+        </div>
+
+        <!-- Conversation -->
+        <div id="conversation" class="bg-white rounded-lg shadow-md mb-6 h-96 overflow-y-auto p-4">
+            <div class="p-8 text-center text-gray-500">
+                <p class="mb-4">Hi! I'm your AI data analyst.</p>
+            </div>
+        </div>
+
+        <!-- Input -->
+        <div class="bg-white rounded-lg shadow-md p-6">
+            <div class="flex gap-4">
+                <input id="promptInput" type="text" placeholder="Ask me anything..." class="flex-1 px-4 py-3 border rounded-md" />
+                <button id="submitBtn" class="px-6 py-3 bg-blue-500 text-white rounded-md hover:bg-blue-600">Send</button>
+                <button id="clearBtn" class="px-6 py-3 bg-red-500 text-white rounded-md hover:bg-red-600">Clear</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:8000";
+        let conversation = [];
+        let selectedDataset = null;
+        let conversationState = {};
+        let currentChatId = null;
+        let allChats = [];
+        let savedConfigurations = [];
+        
+        const conversationDiv = document.getElementById('conversation');
+        const promptInput = document.getElementById('promptInput');
+        const submitBtn = document.getElementById('submitBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const uploadStatus = document.getElementById('uploadStatus');
+        const tablesList = document.getElementById('tablesList');
+        const datasetSelect = document.getElementById('datasetSelect');
+        const viewSavedBtn = document.getElementById('viewSavedBtn');
+        const savedConfigsModal = document.getElementById('savedConfigsModal');
+        const closeSavedModal = document.getElementById('closeSavedModal');
+        const savedConfigsList = document.getElementById('savedConfigsList');
+        const newChatBtn = document.getElementById('newChatBtn');
+        const chatList = document.getElementById('chatList');
+
+        // Global storage for pending saves and retry
+        window.pendingChartSave = null;
+        window.lastAnalyticalQuery = null;
+
+        // ==================== SAVE FUNCTIONS ====================
+        
+        function saveCurrentChart(saveId) {
+            console.log('saveCurrentChart called:', saveId);
+            if (!window.pendingChartSave || window.pendingChartSave.id !== saveId) {
+                alert('Chart data not found. Try creating the visualization again.');
+                return;
+            }
+            const { chartData, config, title } = window.pendingChartSave;
+            saveChartWithData(chartData, config, title);
+            window.pendingChartSave = null;
+        }
+
+        function saveChartWithData(chartData, config, title) {
+            const saved = {
+                id: Date.now(),
+                timestamp: new Date().toISOString(),
+                title: title || `Chart ${new Date().toLocaleString()}`,
+                chartData: chartData,
+                config: config,
+                chartType: chartData?.chart_type,
+                sqlQuery: chartData?.sql_query
+            };
+            savedConfigurations.push(saved);
+            localStorage.setItem('savedConfigurations', JSON.stringify(savedConfigurations));
+            
+            // Download config
+            const blob = new Blob([config], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `config-${saved.id}.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            alert('✅ Chart saved! View in "Saved" button.');
+        }
+
+        function loadSavedConfigurations() {
+            const saved = localStorage.getItem('savedConfigurations');
+            if (saved) {
+                try { savedConfigurations = JSON.parse(saved); } catch (e) { savedConfigurations = []; }
+            }
+        }
+
+        function displaySavedConfigurations() {
+            loadSavedConfigurations();
+            if (savedConfigurations.length === 0) {
+                savedConfigsList.innerHTML = '<p class="text-gray-500 text-center py-8">No saved charts yet.</p>';
+                return;
+            }
+            let html = '';
+            savedConfigurations.slice().reverse().forEach(saved => {
+                const chartPreviewId = `saved-chart-${saved.id}`;
+                html += `
+                    <div class="border-2 border-gray-300 rounded-lg p-4">
+                        <div class="flex justify-between items-start mb-3">
+                            <div>
+                                <h3 class="font-bold text-lg">${saved.title}</h3>
+                                <p class="text-sm text-gray-500">${new Date(saved.timestamp).toLocaleString()}</p>
+                            </div>
+                            <div class="flex gap-2">
+                                <button onclick="viewSavedChart(${saved.id})" class="px-3 py-1 bg-green-500 text-white text-sm rounded">👁️ View</button>
+                                <button onclick="downloadConfig(${saved.id})" class="px-3 py-1 bg-blue-500 text-white text-sm rounded">⬇️</button>
+                                <button onclick="deleteConfig(${saved.id})" class="px-3 py-1 bg-red-500 text-white text-sm rounded">🗑️</button>
+                            </div>
+                        </div>
+                        <div id="${chartPreviewId}" class="hidden bg-gray-50 rounded p-4 mb-3">
+                            <div id="${chartPreviewId}-canvas" style="width:100%; height:400px;"></div>
+                        </div>
+                        <details class="mt-2">
+                            <summary class="cursor-pointer text-sm text-blue-600">View Config</summary>
+                            <pre class="mt-2 text-xs bg-gray-50 p-3 rounded overflow-x-auto">${saved.config}</pre>
+                        </details>
+                    </div>`;
+            });
+            savedConfigsList.innerHTML = html;
+        }
+
+        function viewSavedChart(configId) {
+            const saved = savedConfigurations.find(c => c.id === configId);
+            if (!saved?.chartData) { alert('No chart data.'); return; }
+            const el = document.getElementById(`saved-chart-${configId}`);
+            if (el.classList.contains('hidden')) {
+                el.classList.remove('hidden');
+                setTimeout(() => renderPreviewChart(`saved-chart-${configId}-canvas`, saved.chartData.data, saved.chartData.chart_type, saved.chartData.chart_config), 100);
+            } else {
+                el.classList.add('hidden');
+            }
+        }
+
+        function downloadConfig(configId) {
+            const c = savedConfigurations.find(x => x.id === configId);
+            if (!c) return;
+            const blob = new Blob([c.config], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = `config-${configId}.txt`; a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function deleteConfig(configId) {
+            if (!confirm('Delete this chart?')) return;
+            savedConfigurations = savedConfigurations.filter(c => c.id !== configId);
+            localStorage.setItem('savedConfigurations', JSON.stringify(savedConfigurations));
+            displaySavedConfigurations();
+        }
+
+        // ==================== RETRY FUNCTIONS ====================
+
+        async function retryWithFeedback(queryId) {
+            const input = document.getElementById(`${queryId}-feedback`);
+            const feedback = input?.value.trim();
+            if (!feedback) { alert('Enter feedback.'); return; }
+            await executeRetry(feedback);
+        }
+
+        async function quickRetry(feedback) {
+            await executeRetry(feedback);
+        }
+
+        async function executeRetry(feedback) {
+            if (!window.lastAnalyticalQuery) { alert('No query to retry.'); return; }
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Retrying...';
+            addToConversation({ type: 'user', content: `🔄 Retry: ${feedback}` });
+            
+            try {
+                const res = await fetch(`${API_BASE}/query`, {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        prompt: `${window.lastAnalyticalQuery.prompt}. IMPORTANT: ${feedback}`,
+                        conversation_history: buildConversationHistory(),
+                        selected_dataset: selectedDataset,
+                        conversation_state: {...conversationState, user_feedback: feedback},
+                        chat_id: currentChatId
+                    })
+                });
+                const data = await res.json();
+                if (data.conversation_state) conversationState = data.conversation_state;
+                
+                if (data.type === 'analytical_answer') {
+                    const qid = `query-${Date.now()}`;
+                    let html = `<div class="text-green-700 text-sm font-medium mb-2">✅ Retried</div>${formatAIResponse(data.response)}`;
+                    if (data.sql_query) {
+                        html += buildSqlDisplay(data.sql_query, qid);
+                        window.lastAnalyticalQuery = { prompt: window.lastAnalyticalQuery.prompt, sql: data.sql_query };
+                    }
+                    addToConversation({ type: 'ai', content: html, isHtml: true });
+                } else {
+                    addToConversation({ type: 'ai', content: data.response || 'Done.' });
+                }
+            } catch (e) {
+                addToConversation({ type: 'ai', content: `Error: ${e.message}` });
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Send';
+            }
+        }
+
+        function buildSqlDisplay(sql, queryId) {
+            return `
+                <details class="mt-4 bg-gray-50 border rounded p-3">
+                    <summary class="cursor-pointer text-sm font-semibold text-blue-700">🔍 SQL Query</summary>
+                    <pre class="mt-2 text-xs font-mono overflow-x-auto">${sql}</pre>
+                    <div class="mt-3 border-t pt-3">
+                        <p class="text-xs text-gray-600 mb-2">Not right? Fix it:</p>
+                        <div class="flex gap-2">
+                            <input type="text" id="${queryId}-feedback" placeholder="e.g., use Description column..." class="flex-1 text-sm px-3 py-2 border rounded" />
+                            <button onclick="retryWithFeedback('${queryId}')" class="px-4 py-2 bg-orange-500 text-white text-sm rounded">🔄 Retry</button>
+                        </div>
+                        <div class="mt-2 flex flex-wrap gap-2">
+                            <button onclick="quickRetry('use Description for products')" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">Description</button>
+                            <button onclick="quickRetry('use UPC for products')" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">UPC</button>
+                            <button onclick="quickRetry('use Dollars metric')" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">Dollars</button>
+                            <button onclick="quickRetry('use Units metric')" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">Units</button>
+                        </div>
+                    </div>
+                </details>`;
+        }
+
+        // ==================== CHAT MANAGEMENT ====================
+
+        async function createNewChat() {
+            try {
+                const res = await fetch(`${API_BASE}/chats/create`, { method: 'POST', headers: {'Content-Type': 'application/json'} });
+                const data = await res.json();
+                if (data.success) {
+                    currentChatId = data.chat_id;
+                    conversation = [];
+                    conversationState = {};
+                    selectedDataset = null;
+                    datasetSelect.value = '';
+                    updateConversationDisplay();
+                    await loadChats();
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        async function loadChats() {
+            try {
+                const res = await fetch(`${API_BASE}/chats`);
+                const data = await res.json();
+                if (data.success) { allChats = data.chats; renderChatList(); }
+            } catch (e) { console.error(e); }
+        }
+
+        function renderChatList() {
+            if (allChats.length === 0) {
+                chatList.innerHTML = '<p class="text-gray-400 text-sm text-center py-4">No chats</p>';
+                return;
+            }
+            let html = '<div class="space-y-1">';
+            allChats.forEach(chat => {
+                const active = chat.id === currentChatId;
+                html += `<div class="group"><button onclick="loadChat('${chat.id}')" class="w-full text-left px-3 py-2 rounded hover:bg-gray-800 ${active ? 'bg-gray-800' : ''}">
+                    <p class="text-sm truncate">${chat.title || 'New Chat'}</p>
+                    <p class="text-xs text-gray-500">${new Date(chat.updated_at).toLocaleDateString()}</p>
+                </button></div>`;
+            });
+            chatList.innerHTML = html + '</div>';
+        }
+
+        async function loadChat(chatId) {
+            try {
+                const res = await fetch(`${API_BASE}/chats/${chatId}`);
+                const data = await res.json();
+                if (data.success) {
+                    currentChatId = chatId;
+                    conversation = data.chat.conversation || [];
+                    conversationState = data.chat.conversation_state || {};
+                    selectedDataset = data.chat.selected_dataset;
+                    if (selectedDataset) datasetSelect.value = selectedDataset;
+                    updateConversationDisplay();
+                    renderChatList();
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        async function saveCurrentChat() {
+            if (!currentChatId) return;
+            const firstMsg = conversation.find(m => m.type === 'user');
+            const title = firstMsg ? firstMsg.content.substring(0, 50) : 'New Chat';
+            await fetch(`${API_BASE}/chats/${currentChatId}/save`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ title, conversation, conversation_state: conversationState, selected_dataset: selectedDataset })
+            });
+            loadChats();
+        }
+
+        // ==================== CORE FUNCTIONS ====================
+
+        function buildConversationHistory() {
+            return conversation.filter(m => m.type !== 'system').map(m => ({ role: m.type === 'user' ? 'user' : 'assistant', content: m.content }));
+        }
+
+        async function callApi(prompt) {
+            const res = await fetch(`${API_BASE}/query`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({ prompt, conversation_history: buildConversationHistory(), selected_dataset: selectedDataset, conversation_state: conversationState, chat_id: currentChatId })
+            });
+            if (!res.ok) throw new Error(`Server error: ${res.status}`);
+            const data = await res.json();
+            if (data.conversation_state) conversationState = data.conversation_state;
+            return data;
+        }
+
+        function addToConversation(msg) {
+            conversation.push(msg);
+            updateConversationDisplay();
+            if (currentChatId) saveCurrentChat();
+        }
+
+        function updateConversationDisplay() {
+            if (conversation.length === 0) {
+                conversationDiv.innerHTML = '<div class="p-8 text-center text-gray-500">Hi! Upload data and ask questions.</div>';
+                return;
+            }
+            let html = '<div class="space-y-4">';
+            conversation.forEach(msg => {
+                if (msg.type === 'system') {
+                    html += `<div class="text-center"><div class="inline-block bg-yellow-100 text-yellow-800 text-sm px-4 py-2 rounded-full">${msg.content}</div></div>`;
+                } else {
+                    const isUser = msg.type === 'user';
+                    html += `<div class="${isUser ? 'text-right' : 'text-left'}"><div class="inline-block max-w-3xl rounded-lg p-4 ${isUser ? 'bg-blue-500 text-white' : 'bg-gray-100'}">`;
+                    html += `<div class="text-xs ${isUser ? 'opacity-75' : 'text-gray-600'} mb-1">${isUser ? 'You' : 'AI'}</div>`;
+                    html += msg.isHtml ? msg.content : formatAIResponse(msg.content);
+                    html += '</div></div>';
+                }
+            });
+            conversationDiv.innerHTML = html + '</div>';
+            conversationDiv.scrollTop = conversationDiv.scrollHeight;
+        }
+
+        function formatAIResponse(text) {
+            if (!text) return '';
+            return `<div class="leading-relaxed text-gray-800">${text.replace(/\n/g, '<br>')}</div>`;
+        }
+
+        function renderPreviewChart(chartId, data, chartType, config) {
+            if (!data?.length) return;
+            const dom = document.getElementById(chartId);
+            if (!dom) return;
+            const chart = echarts.init(dom);
+            const cols = Object.keys(data[0]);
+            const xCol = config?.x_axis || cols[0];
+            const yCol = config?.y_axis || cols[1];
+            const xData = data.map(r => String(r[xCol]));
+            const yData = data.map(r => parseFloat(r[yCol]) || 0);
+            
+            let option = {
+                title: { text: config?.title || 'Chart', left: 'center' },
+                tooltip: { trigger: 'axis' },
+                xAxis: { type: 'category', data: xData, axisLabel: { rotate: 45, fontSize: 10 } },
+                yAxis: { type: 'value' },
+                series: [{ type: chartType === 'line' ? 'line' : 'bar', data: yData }],
+                grid: { left: '30%', right: '30%', bottom: '40%' }
+            };
+            if (chartType === 'pie') {
+                option = {
+                    title: { text: config?.title || 'Chart', left: 'center' },
+                    tooltip: { trigger: 'item' },
+                    series: [{ type: 'pie', radius: '55%', data: data.slice(0,15).map(r => ({ name: r[xCol], value: parseFloat(r[yCol]) || 0 })) }]
+                };
+            }
+            chart.setOption(option);
+        }
+
+        async function uploadCsv() {
+            const file = fileInput.files[0];
+            if (!file) { uploadStatus.textContent = "Choose a file."; return; }
+            const form = new FormData();
+            form.append("file", file);
+            const name = document.getElementById('tableName').value.trim();
+            if (name) form.append("table_name", name);
+            uploadStatus.textContent = "Uploading...";
+            try {
+                const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+                const json = await res.json();
+                uploadStatus.textContent = `Uploaded ${json.rows} rows to "${json.table}"`;
+                refreshTables();
+                addToConversation({ type: 'system', content: `Uploaded "${json.table}"` });
+            } catch (e) { uploadStatus.textContent = `Error: ${e.message}`; }
+        }
+
+        async function refreshTables() {
+            try {
+                const res = await fetch(`${API_BASE}/tables`);
+                const json = await res.json();
+                datasetSelect.innerHTML = '<option value="">Auto-select</option>';
+                json.tables.forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t; datasetSelect.appendChild(o); });
+                tablesList.innerHTML = json.tables.length ? `<strong>Tables:</strong> ${json.tables.join(', ')}` : '';
+            } catch (e) { console.error(e); }
+        }
+
+        async function handleSubmit() {
+            const prompt = promptInput.value.trim();
+            if (!prompt) return;
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Thinking...';
+            addToConversation({ type: 'user', content: prompt });
+            promptInput.value = '';
+            
+            try {
+                const response = await callApi(prompt);
+                
+                if (response.type === 'analytical_answer') {
+                    const qid = `query-${Date.now()}`;
+                    let html = `<div class="space-y-3">${formatAIResponse(response.response)}</div>`;
+                    if (response.sql_query) {
+                        html += buildSqlDisplay(response.sql_query, qid);
+                        window.lastAnalyticalQuery = { prompt, sql: response.sql_query };
+                    }
+                    addToConversation({ type: 'ai', content: html, isHtml: true });
+                    
+                } else if (response.type === 'multi_response') {
+                    let chartData = null, config = null, title = null;
+                    for (const r of response.responses) {
+                        if (r.type === 'chart_preview') {
+                            chartData = { data: r.data, chart_type: r.chart_type, chart_config: r.chart_config, x_axis: r.chart_config?.x_axis, y_axis: r.chart_config?.y_axis };
+                            title = r.chart_config?.title || 'Chart';
+                            const cid = `chart-${Date.now()}`;
+                            addToConversation({ type: 'ai', content: `<div class="bg-green-50 border-l-4 border-green-500 p-4 rounded"><h4 class="font-bold text-green-900 mb-2">📊 Preview</h4><div id="${cid}" style="width:100%;height:400px;"></div></div>`, isHtml: true });
+                            setTimeout(() => renderPreviewChart(cid, r.data, r.chart_type, r.chart_config), 100);
+                        } else if (r.type === 'ready_to_build') {
+                            config = r.config;
+                            if (chartData && r.sql_query) chartData.sql_query = r.sql_query;
+                            const saveId = `save-${Date.now()}`;
+                            window.pendingChartSave = { id: saveId, chartData, config, title };
+                            addToConversation({ type: 'ai', content: `
+                                <div class="bg-blue-50 border-l-4 border-blue-500 p-4 rounded">
+                                    <h4 class="font-bold text-blue-900 mb-2">Config Ready</h4>
+                                    <pre class="text-xs bg-white p-3 rounded border overflow-x-auto">${config}</pre>
+                                    <button onclick="saveCurrentChart('${saveId}')" class="mt-3 px-4 py-2 bg-green-500 text-white rounded">💾 Save Chart</button>
+                                </div>`, isHtml: true });
+                        }
+                    }
+                } else {
+                    addToConversation({ type: 'ai', content: response.response || 'Done.' });
+                }
+            } catch (e) {
+                addToConversation({ type: 'ai', content: `Error: ${e.message}` });
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Send';
+            }
+        }
+
+        // Event listeners
+        submitBtn.addEventListener('click', handleSubmit);
+        promptInput.addEventListener('keypress', e => { if (e.key === 'Enter') handleSubmit(); });
+        clearBtn.addEventListener('click', () => { conversation = []; conversationState = {}; updateConversationDisplay(); });
+        uploadBtn.addEventListener('click', uploadCsv);
+        newChatBtn.addEventListener('click', createNewChat);
+        viewSavedBtn.addEventListener('click', () => { displaySavedConfigurations(); savedConfigsModal.classList.remove('hidden'); });
+        closeSavedModal.addEventListener('click', () => savedConfigsModal.classList.add('hidden'));
+        datasetSelect.addEventListener('change', e => { selectedDataset = e.target.value || null; });
+
+        // Global functions
+        window.saveCurrentChart = saveCurrentChart;
+        window.viewSavedChart = viewSavedChart;
+        window.downloadConfig = downloadConfig;
+        window.deleteConfig = deleteConfig;
+        window.retryWithFeedback = retryWithFeedback;
+        window.quickRetry = quickRetry;
+        window.loadChat = loadChat;
+
+        // Init
+        loadSavedConfigurations();
+        refreshTables();
+        createNewChat();
+    </script>
+</div>
+</body>
+</html>

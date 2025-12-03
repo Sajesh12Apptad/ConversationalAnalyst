@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Data Analyst Chat</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-50 flex">
+    <!-- Sidebar -->
+    <div id="sidebar" class="w-64 bg-gray-900 text-white flex flex-col h-screen fixed left-0 top-0">
+        <div class="p-4 border-b border-gray-700">
+            <button id="newChatBtn" class="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg flex items-center justify-center gap-2">
+                <span class="text-xl">+</span>
+                <span>New Chat</span>
+            </button>
+        </div>
+        
+        <div id="chatList" class="flex-1 overflow-y-auto p-2">
+            <p class="text-gray-400 text-sm text-center py-4">No chats yet</p>
+        </div>
+        
+        <div class="p-4 border-t border-gray-700 text-xs text-gray-400">
+            <p>Aevah AI Analyst</p>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 ml-64">
+    <div class="max-w-6xl mx-auto px-4 py-8">
+        <div class="text-center mb-4">
+            <h1 class="text-3xl font-bold text-gray-800">AI Data Analyst</h1>
+            <p class="text-gray-600">Chat with your AI analyst - upload data, ask questions, or build dashboards!</p>
+        </div>
+
+        <!-- Dataset Selection & Upload Section -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
+            <div class="flex gap-4 items-center mb-4">
+                <div class="flex-1">
+                    <label for="datasetSelect" class="block text-sm font-medium text-gray-700 mb-2">Select Dataset:</label>
+                    <select id="datasetSelect" class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">Auto-select best dataset</option>
+                    </select>
+                </div>
+                <div class="flex gap-2 items-end">
+                    <input id="fileInput" type="file" accept=".csv" class="border p-2 rounded" />
+                    <input id="tableName" placeholder="Optional table name" class="border p-2 rounded" />
+                    <button id="uploadBtn" class="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">Upload CSV</button>
+                    <button id="viewSavedBtn" class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700">📁 Saved Configs</button>
+                </div>
+            </div>
+            <div class="flex justify-between items-center">
+                <div>
+                    <div id="uploadStatus" class="text-sm text-gray-600"></div>
+                    <div id="tablesList" class="text-sm text-gray-700"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Saved Configurations Modal -->
+        <div id="savedConfigsModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg shadow-xl p-6 max-w-4xl w-full max-h-[80vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold text-gray-800">💾 Saved Configurations</h2>
+                    <button id="closeSavedModal" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <div id="savedConfigsList" class="space-y-4">
+                    <p class="text-gray-500 text-center py-8">Loading saved configurations...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Conversation Section -->
+        <div id="conversation" class="bg-white rounded-lg shadow-md mb-6 h-96 overflow-y-auto p-4">
+            <div class="p-8 text-center text-gray-500">
+                <p class="mb-4">Hi! I'm your AI data analyst. You can:</p>
+                <ul class="text-sm text-gray-600 space-y-1">
+                    <li>• Upload CSV files and ask me questions</li>
+                    <li>• Request charts and visualizations</li>
+                    <li>• Build dashboards through conversation</li>
+                    <li>• Have a normal conversation with me</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Input Section -->
+        <div class="bg-white rounded-lg shadow-md p-6">
+            <div class="flex gap-4 mb-4">
+                <input id="promptInput" type="text" placeholder="Ask me anything..." class="flex-1 px-4 py-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <button id="submitBtn" class="px-6 py-3 bg-blue-500 text-white rounded-md hover:bg-blue-600">Send</button>
+                <button id="clearBtn" class="px-6 py-3 bg-red-500 text-white rounded-md hover:bg-red-600">Clear History</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:8000";
+        let conversation = [];
+        let selectedDataset = null;
+        let conversationState = {};
+        let currentChatId = null;
+        let allChats = [];
+        
+        const conversationDiv = document.getElementById('conversation');
+        const promptInput = document.getElementById('promptInput');
+        const submitBtn = document.getElementById('submitBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const fileInput = document.getElementById('fileInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const uploadStatus = document.getElementById('uploadStatus');
+        const tablesList = document.getElementById('tablesList');
+        const datasetSelect = document.getElementById('datasetSelect');
+        const viewSavedBtn = document.getElementById('viewSavedBtn');
+        const savedConfigsModal = document.getElementById('savedConfigsModal');
+        const closeSavedModal = document.getElementById('closeSavedModal');
+        const savedConfigsList = document.getElementById('savedConfigsList');
+        const newChatBtn = document.getElementById('newChatBtn');
+        const chatList = document.getElementById('chatList');
+
+        let savedConfigurations = [];
+
+        // ==================== CHAT MANAGEMENT ====================
+
+        async function createNewChat() {
+            try {
+                const res = await fetch(`${API_BASE}/chats/create`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'}
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    currentChatId = data.chat_id;
+                    conversation = [];
+                    conversationState = {};
+                    selectedDataset = null;
+                    datasetSelect.value = '';
+                    
+                    updateConversationDisplay();
+                    await loadChats();
+                    
+                    addToConversation({
+                        type: 'system',
+                        content: 'New chat created! Upload a dataset or ask me anything.'
+                    });
+                }
+            } catch (e) {
+                console.error('Error creating chat:', e);
+            }
+        }
+
+        async function loadChats() {
+            try {
+                const res = await fetch(`${API_BASE}/chats`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    allChats = data.chats;
+                    renderChatList();
+                }
+            } catch (e) {
+                console.error('Error loading chats:', e);
+            }
+        }
+
+        function renderChatList() {
+            if (allChats.length === 0) {
+                chatList.innerHTML = '<p class="text-gray-400 text-sm text-center py-4">No chats yet</p>';
+                return;
+            }
+            
+            let html = '<div class="space-y-1">';
+            allChats.forEach(chat => {
+                const isActive = chat.id === currentChatId;
+                const title = chat.title || 'New Chat';
+                const date = new Date(chat.updated_at).toLocaleDateString();
+                
+                html += `
+                    <div class="group relative">
+                        <button 
+                            onclick="loadChat('${chat.id}')" 
+                            class="w-full text-left px-3 py-2 rounded hover:bg-gray-800 ${isActive ? 'bg-gray-800' : ''} transition flex items-center justify-between"
+                        >
+                            <div class="flex-1 min-w-0">
+                                <p class="text-sm truncate">${title}</p>
+                                <p class="text-xs text-gray-500">${date}</p>
+                            </div>
+                            <button 
+                                onclick="event.stopPropagation(); deleteChat('${chat.id}')"
+                                class="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition"
+                            >
+                                🗑️
+                            </button>
+                        </button>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            
+            chatList.innerHTML = html;
+        }
+
+        async function loadChat(chatId) {
+            try {
+                const res = await fetch(`${API_BASE}/chats/${chatId}`);
+                const data = await res.json();
+                
+                if (data.success) {
+                    currentChatId = chatId;
+                    conversation = data.chat.conversation || [];
+                    conversationState = data.chat.conversation_state || {};
+                    selectedDataset = data.chat.selected_dataset || null;
+                    
+                    if (selectedDataset) {
+                        datasetSelect.value = selectedDataset;
+                    }
+                    
+                    updateConversationDisplay();
+                    renderChatList();
+                }
+            } catch (e) {
+                console.error('Error loading chat:', e);
+                alert('Error loading chat');
+            }
+        }
+
+        async function saveCurrentChat() {
+            if (!currentChatId) return;
+            
+            try {
+                // Auto-generate title from first user message if still "New Chat"
+                let title = "New Chat";
+                const firstUserMsg = conversation.find(m => m.type === 'user');
+                if (firstUserMsg) {
+                    title = firstUserMsg.content.substring(0, 50);
+                    if (firstUserMsg.content.length > 50) title += '...';
+                }
+                
+                await fetch(`${API_BASE}/chats/${currentChatId}/save`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        title: title,
+                        conversation: conversation,
+                        conversation_state: conversationState,
+                        selected_dataset: selectedDataset
+                    })
+                });
+                
+                await loadChats();
+            } catch (e) {
+                console.error('Error saving chat:', e);
+            }
+        }
+
+        async function deleteChat(chatId) {
+            if (!confirm('Delete this chat?')) return;
+            
+            try {
+                await fetch(`${API_BASE}/chats/${chatId}`, {
+                    method: 'DELETE'
+                });
+                
+                if (chatId === currentChatId) {
+                    await createNewChat();
+                } else {
+                    await loadChats();
+                }
+            } catch (e) {
+                console.error('Error deleting chat:', e);
+            }
+        }
+
+        // Make functions available globally
+        window.loadChat = loadChat;
+        window.deleteChat = deleteChat;
+
+        function buildConversationHistory() {
+            return conversation
+                .filter(msg => msg.type !== 'system')
+                .map(msg => ({
+                    role: msg.type === 'user' ? 'user' : 'assistant',
+                    content: msg.content
+                }));
+        }
+
+        async function callApi(userPrompt) {
+            const conversationHistory = buildConversationHistory();
+            
+            const res = await fetch(`${API_BASE}/query`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    prompt: userPrompt,
+                    conversation_history: conversationHistory,
+                    selected_dataset: selectedDataset,
+                    conversation_state: conversationState,
+                    chat_id: currentChatId
+                })
+            });
+
+            if (!res.ok) {
+                let errorMessage = "API request failed";
+                try {
+                    const errorData = await res.json();
+                    if (errorData.detail) {
+                        errorMessage = errorData.detail;
+                    }
+                } catch (e) {
+                    errorMessage = `Server error: ${res.status} ${res.statusText}`;
+                }
+                throw new Error(errorMessage);
+            }
+
+            const responseData = await res.json();
+            
+            // Update conversation state if provided
+            if (responseData.conversation_state) {
+                conversationState = responseData.conversation_state;
+            }
+            
+            return responseData;
+        }
+
+        async function uploadCsv() {
+            const file = fileInput.files[0];
+            if (!file) {
+                uploadStatus.textContent = "Please choose a CSV file first.";
+                return;
+            }
+            const form = new FormData();
+            form.append("file", file);
+            const tableName = document.getElementById('tableName').value.trim();
+            if (tableName) form.append("table_name", tableName);
+
+            uploadStatus.textContent = "Uploading...";
+            try {
+                const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+                const json = await res.json();
+                if (!res.ok) throw new Error(json.detail || "Upload failed");
+                uploadStatus.textContent = `Uploaded ${json.rows} rows into table "${json.table}".`;
+                await refreshTables();
+                
+                addToConversation({
+                    type: 'system',
+                    content: `Uploaded "${json.table}" with ${json.rows} rows. You can now ask me questions about this data!`
+                });
+            } catch (err) {
+                uploadStatus.textContent = `Upload error: ${err.message}`;
+            }
+        }
+
+        async function refreshTables() {
+            try {
+                const res = await fetch(`${API_BASE}/tables`);
+                const json = await res.json();
+                
+                datasetSelect.innerHTML = '<option value="">Auto-select best dataset</option>';
+                json.tables.forEach(table => {
+                    const option = document.createElement('option');
+                    option.value = table;
+                    option.textContent = table;
+                    datasetSelect.appendChild(option);
+                });
+                
+                if (json.tables.length > 0) {
+                    tablesList.innerHTML = "<strong>Available tables:</strong> " + json.tables.join(", ");
+                } else {
+                    tablesList.textContent = "";
+                }
+            } catch (e) {
+                console.error("Error refreshing tables:", e);
+            }
+        }
+
+        datasetSelect.addEventListener('change', (e) => {
+            selectedDataset = e.target.value || null;
+            const selectedName = selectedDataset || "auto-select";
+            addToConversation({
+                type: 'system',
+                content: `Dataset changed to: ${selectedName}`
+            });
+        });
+
+        function addToConversation(message) {
+            conversation.push(message);
+            updateConversationDisplay();
+            
+            // Auto-save chat after each message
+            if (currentChatId) {
+                saveCurrentChat();
+            }
+        }
+
+        function updateConversationDisplay() {
+            if (conversation.length === 0) {
+                conversationDiv.innerHTML = `
+                    <div class="p-8 text-center text-gray-500">
+                        <p class="mb-4">Hi! I'm your AI data analyst. You can:</p>
+                        <ul class="text-sm text-gray-600 space-y-1">
+                            <li>• Upload CSV files and ask me questions</li>
+                            <li>• Request charts and visualizations</li>
+                            <li>• Build dashboards through conversation</li>
+                            <li>• Have a normal conversation with me</li>
+                        </ul>
+                    </div>`;
+                return;
+            }
+
+            let html = '<div class="space-y-4">';
+            conversation.forEach((message, index) => {
+                const isUser = message.type === 'user';
+                const isSystem = message.type === 'system';
+                
+                if (isSystem) {
+                    html += `<div class="text-center"><div class="inline-block bg-yellow-100 text-yellow-800 text-sm px-4 py-2 rounded-full">${message.content}</div></div>`;
+                } else {
+                    html += `<div class="${isUser ? 'text-right' : 'text-left'}">`;
+                    html += `<div class="inline-block max-w-3xl rounded-lg p-4 ${isUser ? 'bg-blue-500 text-white' : 'bg-gray-100'}">`;
+                    
+                    if (isUser) {
+                        html += `<div class="text-xs opacity-75 mb-1">You</div>`;
+                        html += `<p class="text-white">${message.content}</p>`;
+                    } else {
+                        html += `<div class="text-xs text-gray-600 mb-1">AI Analyst</div>`;
+                        if (message.isHtml) {
+                            html += message.content;
+                        } else {
+                            html += formatAIResponse(message.content);
+                        }
+                    }
+                    
+                    html += `</div></div>`;
+                }
+            });
+            html += '</div>';
+            
+            conversationDiv.innerHTML = html;
+            conversationDiv.scrollTop = conversationDiv.scrollHeight;
+        }
+
+        function formatAIResponse(text) {
+            if (!text) return '';
+            
+            let formatted = text;
+            formatted = formatted.replace(/\s+/g, ' ').trim();
+            formatted = formatted.replace(/(\w)\s+([t|d])\b/g, '$1$2');
+            
+            let lines = formatted.split(/(\d+)\.\s+/);
+            let result = '';
+            
+            for (let i = 0; i < lines.length; i++) {
+                if (i === 0 && lines[i].trim()) {
+                    result += lines[i].trim();
+                } else if (!isNaN(lines[i]) && lines[i].trim()) {
+                    let number = lines[i];
+                    let content = lines[i + 1] || '';
+                    result += `<br><br><div class="flex gap-2 ml-2"><span class="font-bold flex-shrink-0" style="font-style: normal;">${number}.</span><span>${content.trim()}</span></div>`;
+                    i++;
+                }
+            }
+            
+            formatted = result;
+            formatted = formatted.replace(/\?<\/span><\/div>(\s*[A-Z])/g, '?</span></div><br><br>$1');
+            formatted = formatted.replace(/\(e\.g\.,([^)]+)\)/g, '<em>(e.g.,$1)</em>');
+            
+            if (!formatted.includes('<div class="flex gap-2')) {
+                formatted = formatted.replace(/\s+(By answering|Based on|Once I|If there|If you|Please let)/g, '<br><br>$1');
+            }
+            
+            formatted = formatted.replace(/(<br>){3,}/g, '<br><br>');
+            formatted = formatted.replace(/^(<br>)+/, '');
+            
+            return `<div class="leading-relaxed text-gray-800">${formatted}</div>`;
+        }
+
+        function renderPreviewChart(chartId, data, chartType, config) {
+            console.log('Rendering chart:', chartId, 'Type:', chartType, 'Data rows:', data.length);
+            
+            if (!data || data.length === 0) {
+                console.error('No data to render');
+                document.getElementById(chartId).innerHTML = '<p class="text-red-500 p-4">No data available for preview</p>';
+                return;
+            }
+            
+            const chartDom = document.getElementById(chartId);
+            if (!chartDom) {
+                console.error('Chart container not found:', chartId);
+                return;
+            }
+            
+            const myChart = echarts.init(chartDom);
+            
+            const columns = Object.keys(data[0]);
+            const xAxisColumn = config?.x_axis || columns[0];
+            const yAxisColumn = config?.y_axis || columns[1];
+            
+            console.log('Columns:', columns);
+            console.log('X-axis:', xAxisColumn, 'Y-axis:', yAxisColumn);
+            
+            let option = {};
+            
+            if (chartType === 'line') {
+                const xAxisData = data.map(row => String(row[xAxisColumn]));
+                const yAxisData = data.map(row => parseFloat(row[yAxisColumn]) || 0);
+                
+                option = {
+                    title: {
+                        text: config?.title || 'Line Chart Preview',
+                        left: 'center',
+                        textStyle: { fontSize: 16, fontWeight: 'bold' }
+                    },
+                    tooltip: {
+                        trigger: 'axis',
+                        formatter: function(params) {
+                            const item = params[0];
+                            return `${item.name}<br/>${yAxisColumn}: ${item.value.toFixed(2)}`;
+                        }
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: xAxisData,
+                        name: xAxisColumn,
+                        axisLabel: {
+                            rotate: 45,
+                            interval: 0,
+                            fontSize: 10
+                        }
+                    },
+                    yAxis: {
+                        type: 'value',
+                        name: yAxisColumn,
+                        axisLabel: {
+                            formatter: '{value}'
+                        }
+                    },
+                    series: [{
+                        name: yAxisColumn,
+                        type: 'line',
+                        data: yAxisData,
+                        smooth: true,
+                        lineStyle: { width: 3 },
+                        itemStyle: { color: '#3b82f6' }
+                    }],
+                    grid: {
+                        left: '10%',
+                        right: '10%',
+                        bottom: '20%',
+                        containLabel: true
+                    }
+                };
+            } else if (chartType === 'bar') {
+                const xAxisData = data.map(row => String(row[xAxisColumn]));
+                const yAxisData = data.map(row => parseFloat(row[yAxisColumn]) || 0);
+                
+                option = {
+                    title: {
+                        text: config?.title || 'Bar Chart Preview',
+                        left: 'center',
+                        textStyle: { fontSize: 16, fontWeight: 'bold' }
+                    },
+                    tooltip: {
+                        trigger: 'axis',
+                        axisPointer: { type: 'shadow' }
+                    },
+                    xAxis: {
+                        type: 'category',
+                        data: xAxisData,
+                        axisLabel: {
+                            rotate: 45,
+                            interval: 0,
+                            fontSize: 10
+                        }
+                    },
+                    yAxis: {
+                        type: 'value',
+                        name: yAxisColumn
+                    },
+                    series: [{
+                        name: yAxisColumn,
+                        type: 'bar',
+                        data: yAxisData,
+                        itemStyle: { color: '#10b981' }
+                    }],
+                    grid: {
+                        left: '10%',
+                        right: '10%',
+                        bottom: '20%',
+                        containLabel: true
+                    }
+                };
+            } else if (chartType === 'pie') {
+                const pieData = data.slice(0, 20).map(row => ({
+                    name: String(row[xAxisColumn]),
+                    value: parseFloat(row[yAxisColumn]) || 0
+                }));
+                
+                option = {
+                    title: {
+                        text: config?.title || 'Pie Chart Preview',
+                        left: 'center',
+                        textStyle: { fontSize: 16, fontWeight: 'bold' }
+                    },
+                    tooltip: {
+                        trigger: 'item',
+                        formatter: '{b}: {c} ({d}%)'
+                    },
+                    legend: {
+                        orient: 'vertical',
+                        left: 'left',
+                        top: '15%',
+                        data: pieData.map(d => d.name),
+                        type: 'scroll'
+                    },
+                    series: [{
+                        name: yAxisColumn,
+                        type: 'pie',
+                        radius: '55%',
+                        center: ['50%', '60%'],
+                        data: pieData,
+                        emphasis: {
+                            itemStyle: {
+                                shadowBlur: 10,
+                                shadowOffsetX: 0,
+                                shadowColor: 'rgba(0, 0, 0, 0.5)'
+                            }
+                        }
+                    }]
+                };
+            } else if (chartType === 'scatter') {
+                // For scatter plot, we need 2 numeric columns
+                const xAxisData = data.map(row => parseFloat(row[xAxisColumn]) || 0);
+                const yAxisData = data.map(row => parseFloat(row[yAxisColumn]) || 0);
+                const scatterData = xAxisData.map((x, i) => [x, yAxisData[i]]);
+                
+                option = {
+                    title: {
+                        text: config?.title || 'Scatter Plot Preview',
+                        left: 'center',
+                        textStyle: { fontSize: 16, fontWeight: 'bold' }
+                    },
+                    tooltip: {
+                        trigger: 'item',
+                        formatter: function(params) {
+                            return `${xAxisColumn}: ${params.value[0]}<br/>${yAxisColumn}: ${params.value[1]}`;
+                        }
+                    },
+                    xAxis: {
+                        type: 'value',
+                        name: xAxisColumn
+                    },
+                    yAxis: {
+                        type: 'value',
+                        name: yAxisColumn
+                    },
+                    series: [{
+                        type: 'scatter',
+                        data: scatterData,
+                        symbolSize: 10,
+                        itemStyle: {
+                            color: '#8b5cf6',
+                            opacity: 0.7
+                        }
+                    }],
+                    grid: {
+                        left: '10%',
+                        right: '10%',
+                        bottom: '10%',
+                        containLabel: true
+                    }
+                };
+            } else {
+                // Default to bar chart
+                const xAxisData = data.map(row => String(row[xAxisColumn]));
+                const yAxisData = data.map(row => parseFloat(row[yAxisColumn]) || 0);
+                
+                option = {
+                    title: {
+                        text: config?.title || 'Chart Preview',
+                        left: 'center'
+                    },
+                    tooltip: { trigger: 'axis' },
+                    xAxis: {
+                        type: 'category',
+                        data: xAxisData,
+                        axisLabel: { rotate: 45, fontSize: 10 }
+                    },
+                    yAxis: { type: 'value' },
+                    series: [{
+                        type: 'bar',
+                        data: yAxisData
+                    }],
+                    grid: {
+                        left: '10%',
+                        right: '10%',
+                        bottom: '20%',
+                        containLabel: true
+                    }
+                };
+            }
+            
+            myChart.setOption(option);
+            
+            window.addEventListener('resize', () => {
+                myChart.resize();
+            });
+            
+            console.log('Chart rendered successfully');
+        }
+
+        function saveConfiguration(configText) {
+            // Save to local storage
+            const config = {
+                id: Date.now(),
+                timestamp: new Date().toISOString(),
+                config: configText,
+                title: `Configuration ${new Date().toLocaleString()}`
+            };
+            
+            savedConfigurations.push(config);
+            localStorage.setItem('savedConfigurations', JSON.stringify(savedConfigurations));
+            
+            // Also download as file
+            const blob = new Blob([configText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `superset-config-${config.id}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            alert('Configuration saved! You can view it in "Saved Configs" button.');
+        }
+
+        function loadSavedConfigurations() {
+            const saved = localStorage.getItem('savedConfigurations');
+            if (saved) {
+                savedConfigurations = JSON.parse(saved);
+            }
+        }
+
+        function displaySavedConfigurations() {
+            loadSavedConfigurations();
+            
+            if (savedConfigurations.length === 0) {
+                savedConfigsList.innerHTML = '<p class="text-gray-500 text-center py-8">No saved configurations yet. Create visualizations to save configs!</p>';
+                return;
+            }
+            
+            let html = '';
+            savedConfigurations.reverse().forEach((config, index) => {
+                const date = new Date(config.timestamp).toLocaleString();
+                html += `
+                    <div class="border border-gray-300 rounded-lg p-4 hover:shadow-md transition">
+                        <div class="flex justify-between items-start mb-2">
+                            <div>
+                                <h3 class="font-bold text-lg text-gray-800">${config.title}</h3>
+                                <p class="text-sm text-gray-500">${date}</p>
+                            </div>
+                            <div class="flex gap-2">
+                                <button onclick="downloadConfig(${config.id})" class="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600">
+                                    ⬇️ Download
+                                </button>
+                                <button onclick="deleteConfig(${config.id})" class="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600">
+                                    🗑️ Delete
+                                </button>
+                            </div>
+                        </div>
+                        <details class="mt-2">
+                            <summary class="cursor-pointer text-sm text-blue-600 hover:text-blue-800">View Configuration</summary>
+                            <div class="mt-2 bg-gray-50 p-3 rounded border border-gray-200">
+                                <pre class="text-xs overflow-x-auto">${config.config}</pre>
+                            </div>
+                        </details>
+                    </div>
+                `;
+            });
+            
+            savedConfigsList.innerHTML = html;
+        }
+
+        function downloadConfig(configId) {
+            const config = savedConfigurations.find(c => c.id === configId);
+            if (!config) return;
+            
+            const blob = new Blob([config.config], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `superset-config-${configId}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function deleteConfig(configId) {
+            if (!confirm('Are you sure you want to delete this configuration?')) return;
+            
+            savedConfigurations = savedConfigurations.filter(c => c.id !== configId);
+            localStorage.setItem('savedConfigurations', JSON.stringify(savedConfigurations));
+            displaySavedConfigurations();
+        }
+
+        viewSavedBtn.addEventListener('click', () => {
+            displaySavedConfigurations();
+            savedConfigsModal.classList.remove('hidden');
+        });
+
+        closeSavedModal.addEventListener('click', () => {
+            savedConfigsModal.classList.add('hidden');
+        });
+
+        async function handleSubmit() {
+            const prompt = promptInput.value.trim();
+            if (!prompt) return;
+            
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Thinking...';
+            
+            addToConversation({ type: 'user', content: prompt });
+            promptInput.value = '';
+            
+            try {
+                const response = await callApi(prompt);
+                console.log("RAW BACKEND RESPONSE:", response);
+
+                
+                if (response.type === 'chart_refinement') {
+                    // Handle refined chart
+                    addToConversation({
+                        type: 'ai',
+                        content: response.response,
+                        isHtml: true
+                    });
+                    
+                    // Render the refined chart
+                    if (response.chart_data) {
+                        setTimeout(() => {
+                            renderPreviewChart(
+                                response.chart_data.id,
+                                response.chart_data.data,
+                                response.chart_data.type,
+                                response.chart_data.config
+                            );
+                        }, 100);
+                    }
+                } else if (response.type === 'refinement_answer') {
+                    // Handle answer to question about chart
+                    addToConversation({
+                        type: 'ai',
+                        content: response.response
+                    });
+                } else if (response.type === 'multi_response') {
+                    for (const resp of response.responses) {
+                        if (resp.type === 'chart_preview') {
+                            const chartId = `chart-preview-${Date.now()}`;
+                            let previewDisplay = `
+                                <div class="bg-green-50 border-l-4 border-green-500 p-4 rounded mb-4">
+                                    <h4 class="font-bold text-green-900 mb-2">📊 Chart Preview</h4>
+                                    <div id="${chartId}" style="width:100%; height:400px;"></div>
+                                    <p class="text-xs text-gray-600 mt-2">Preview based on actual data from your dataset</p>
+                                </div>
+                            `;
+                            
+                            addToConversation({
+                                type: 'ai',
+                                content: previewDisplay,
+                                isHtml: true
+                            });
+                            
+                            setTimeout(() => {
+                                renderPreviewChart(chartId, resp.data, resp.chart_type, resp.chart_config);
+                            }, 100);
+                            
+                        } else if (resp.type === 'ready_to_build') {
+                            let configDisplay = `
+                                <div class="space-y-4">
+                                    <div class="text-gray-800 leading-relaxed">
+                                        ${resp.confirmation.split('\n').map(line => line.trim() ? `<p class="mb-2">${line}</p>` : '<div class="mb-3"></div>').join('')}
+                                    </div>
+                                    
+                                    <div class="bg-blue-50 border-l-4 border-blue-500 p-4 rounded">
+                                        <h4 class="font-bold text-blue-900 mb-2">Superset Configuration</h4>
+                                        <div class="bg-white p-4 rounded border border-gray-300 font-mono text-xs overflow-x-auto">
+                                            <pre>${resp.config}</pre>
+                                        </div>
+                                        
+                                        <div class="mt-4 flex gap-2">
+                                            <button onclick="saveConfiguration(\`${resp.config.replace(/`/g, '\\`')}\`)" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
+                                                💾 Save Configuration
+                                            </button>
+                                        </div>
+                                        
+                                        <div class="mt-3 bg-yellow-50 p-3 rounded border border-yellow-200">
+                                            <p class="text-xs text-yellow-800">
+                                                <strong>Note:</strong> Automatic Superset deployment is currently in development. 
+                                                You can manually import this configuration into your Superset instance.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                            
+                            addToConversation({
+                                type: 'ai',
+                                content: configDisplay,
+                                isHtml: true
+                            });
+                        }
+                    }
+                } else if (response.type === 'executive_summary') {
+                    let summaryDisplay = `
+                        <div class="space-y-4 bg-white p-4 rounded border-2 border-blue-400">
+                            <div class="border-b-2 border-blue-400 pb-2 mb-4">
+                                <h3 class="text-lg font-bold text-blue-900">📊 Executive Summary</h3>
+                            </div>
+                            ${formatAIResponse(response.response)}
+                        </div>
+                    `;
+                    
+                    addToConversation({
+                        type: 'ai',
+                        content: summaryDisplay,
+                        isHtml: true
+                    });
+                } else if (response.type === 'forecast') {
+                    let forecastDisplay = `
+                        <div class="space-y-3">
+                            ${response.response.split('\n').map(line => {
+                                if (line.trim().startsWith('**') && line.trim().endsWith('**')) {
+                                    return `<h4 class="font-bold text-gray-900 mt-3 mb-1">${line.replace(/\*\*/g, '')}</h4>`;
+                                } else if (line.trim().startsWith('- ')) {
+                                    return `<div class="ml-4 text-gray-700">${line}</div>`;
+                                } else if (line.trim()) {
+                                    return `<p class="text-gray-800">${line}</p>`;
+                                }
+                                return '';
+                            }).join('')}
+                        </div>
+                    `;
+                    
+                    addToConversation({
+                        type: 'ai',
+                        content: forecastDisplay,
+                        isHtml: true
+                    });
+                } else if (response.type === 'dashboard_building') {
+                    addToConversation({
+                        type: 'ai',
+                        content: response.response || "I processed your request"
+                    });
+                } else {
+                    addToConversation({
+                        type: 'ai',
+                        content: response.response || "I processed your request"
+                    });
+                }
+            } catch (err) {
+                addToConversation({
+                    type: 'ai',
+                    content: `Error: ${err.message}`
+                });
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Send';
+            }
+        }
+
+        submitBtn.addEventListener('click', handleSubmit);
+        promptInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') handleSubmit();
+        });
+        
+        clearBtn.addEventListener('click', () => {
+            if (confirm('Are you sure you want to clear the conversation history?')) {
+                conversation = [];
+                conversationState = {};
+                updateConversationDisplay();
+                
+                if (currentChatId) {
+                    saveCurrentChat();
+                }
+                
+                addToConversation({
+                    type: 'system',
+                    content: 'Conversation history cleared. Starting fresh!'
+                });
+            }
+        });
+        
+        uploadBtn.addEventListener('click', uploadCsv);
+        newChatBtn.addEventListener('click', createNewChat);
+        
+        // Initialize
+        loadSavedConfigurations();
+        refreshTables();
+        createNewChat(); // Start with a new chat
+    </script>
+</div>
+</div>
+</body>
+</html>
